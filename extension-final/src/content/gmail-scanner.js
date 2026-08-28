@@ -121,6 +121,13 @@ function extractContent() {
 
         if (!bodyEl) return null;
 
+
+        const messageContainer = bodyEl.closest('[data-legacy-message-id]');
+        const messageId = messageContainer ? messageContainer.getAttribute('data-legacy-message-id') : null;
+        
+        const match = window.location.pathname.match(/\/u\/(\d+)\//);
+        const userIndex = match ? match[1] : '0';
+
         const subject = (document.querySelector('h2.hP') || document.querySelector('h2'))?.innerText || "Unknown Subject";
         const senderEl = document.querySelector('.gD') || document.querySelector('span[email]');
         const sender = senderEl ? (senderEl.getAttribute('email') || senderEl.innerText) : "Unknown Sender";
@@ -132,7 +139,9 @@ function extractContent() {
             senderDomain: sender.includes('@') ? sender.split('@')[1] : 'unknown',
             body: bodyEl.innerText,
             fullText: `Subject: ${subject}\nFrom: ${sender}\n\n${bodyEl.innerText}`,
-            id: subject + (bodyEl.innerText.substring(0, 50))
+            id: subject + (bodyEl.innerText.substring(0, 50)),
+            messageId,
+            userIndex
         };
     } else {
         // GENERIC LOGIC
@@ -160,63 +169,174 @@ function extractContent() {
 function scanContent(data) {
     updateStatus("Scanning Content...", "scanning");
 
-    chrome.runtime.sendMessage({
-        type: "SCAN_CONTENT",
-        data: {
-            subject: data.subject,
-            senderDomain: data.senderDomain,
-            fullText: data.fullText,
-            timestamp: new Date().toISOString()
-        }
-    }, (response) => {
-        if (chrome.runtime.lastError) {
-            console.error("Extension Error:", chrome.runtime.lastError);
-            updateStatus("Extension Error", "danger");
-            return;
-        }
-
-        if (response && response.success && response.data) {
-            let risk = response.data.global_risk_score;
-            // Ensure valid number
-            if (typeof risk !== 'number' || isNaN(risk)) {
-                risk = response.data.max_risk_score || 0;
+    const performScan = (rawHeaders = null) => {
+        chrome.runtime.sendMessage({
+            type: "SCAN_CONTENT",
+            data: {
+                subject: data.subject,
+                senderDomain: data.senderDomain,
+                fullText: data.fullText,
+                timestamp: new Date().toISOString(),
+                rawHeaders: rawHeaders
+            }
+        }, (response) => {
+            if (chrome.runtime.lastError) {
+                console.error("Extension Error:", chrome.runtime.lastError);
+                updateStatus("Extension Error", "danger");
+                return;
             }
 
-            const score = Math.round(risk * 100);
+            if (response && response.success && response.data) {
+                let risk = response.data.global_risk_score;
+                // Ensure valid number
+                if (typeof risk !== 'number' || isNaN(risk)) {
+                    risk = response.data.max_risk_score || 0;
+                }
 
-            // USER REQUEST: Status Panel must reflect Domain Safety (Gmail = Safe)
-            // We do NOT show "Threat" in the floating widget for email text checks.
-            updateStatus("SecureSentinel: Active", "safe");
+                const score = Math.round(risk * 100);
 
-            const resultData = {
-                subject: data.subject,
-                sender_domain: data.senderDomain,
-                risk_score: risk,
-                risk_level: response.data.status || (score > 50 ? "SUSPICIOUS" : "SAFE"),
-                signals: response.data.signals, // PASS SIGNALS
-                timestamp: new Date().toISOString()
-            };
+                // USER REQUEST: Status Panel must reflect Domain Safety (Gmail = Safe)
+                // We do NOT show "Threat" in the floating widget for email text checks.
+                updateStatus("SecureSentinel: Active", "safe");
 
-            // CACHE RESULT
-            lastScanResult = resultData;
+                const resultData = {
+                    subject: data.subject,
+                    sender_domain: data.senderDomain,
+                    risk_score: risk,
+                    risk_level: response.data.status || (score > 50 ? "SUSPICIOUS" : "SAFE"),
+                    signals: response.data.signals, // PASS SIGNALS
+                    timestamp: new Date().toISOString()
+                };
 
-            // SAVE TO STORAGE (Robust Fix)
-            chrome.storage.local.set({
-                'latestScan': resultData
-            }, () => {
-                console.log("[WebSentinel] Saved scan to storage");
-            });
+                // INJECT IN-GMAIL WARNING BANNER IF SUSPICIOUS OR CRITICAL
+                injectGmailWarningBanner(resultData, response.data);
 
-            chrome.runtime.sendMessage({
-                type: 'EMAIL_SCANNED',
-                data: resultData
-            });
+                // CACHE RESULT
+                lastScanResult = resultData;
 
-        } else {
-            console.error("Scan Failed:", response?.error);
-            updateStatus("Connection Fail", "danger");
-        }
-    });
+                // SAVE TO STORAGE (Robust Fix)
+                chrome.storage.local.set({
+                    'latestScan': resultData
+                }, () => {
+                    console.log("[WebSentinel] Saved scan to storage");
+                });
+
+                chrome.runtime.sendMessage({
+                    type: 'EMAIL_SCANNED',
+                    data: resultData
+                });
+
+            } else {
+                console.error("Scan Failed:", response?.error);
+                updateStatus("Connection Fail", "danger");
+            }
+        });
+    };
+
+    if (data.type === 'email' && data.messageId) {
+        console.log(`[WebSentinel] Requesting raw email for message ID: ${data.messageId} (User: ${data.userIndex})`);
+        
+        let apiResponded = false;
+        
+        const timeoutId = setTimeout(() => {
+            if (!apiResponded) {
+                console.warn("[WebSentinel] Gmail API request timed out after 10 seconds. Falling back to DOM scan.");
+                apiResponded = true;
+                performScan(null);
+            }
+        }, 10000);
+
+        chrome.runtime.sendMessage({
+            type: "GET_RAW_EMAIL_API",
+            messageId: data.messageId
+        }, async (response) => {
+            if (apiResponded) return; // Prevent double execution if timeout already fired
+            apiResponded = true;
+            clearTimeout(timeoutId);
+
+            if (chrome.runtime.lastError) {
+                console.warn("[WebSentinel] GET_RAW_EMAIL_API error:", chrome.runtime.lastError);
+                performScan(null);
+            } else if (!response || !response.success || !response.raw) {
+                console.warn(`[WebSentinel] Gmail API raw acquisition failed. Reason: ${response ? response.reason : "No response"}`);
+                performScan(null);
+            } else {
+                console.log(`[WebSentinel] Successfully acquired raw email headers via Gmail API! (${response.raw.length} bytes)`);
+                performScan(response.raw);
+            }
+        });
+        
+    } else {
+        performScan(null);
+    }
+}
+
+// ============================================
+// IN-GMAIL TOP WARNING BANNER UI
+// ============================================
+function injectGmailWarningBanner(scanResult, fullResponse) {
+    if (!window.location.hostname.includes("mail.google.com")) return;
+
+    const existingBanner = document.getElementById("ss-gmail-banner");
+    if (existingBanner) existingBanner.remove();
+
+    const score = Math.round(scanResult.risk_score * 100);
+    const status = scanResult.risk_level;
+
+    // Only inject banner for SUSPICIOUS or CRITICAL threats (or if risk > 35%)
+    if (score < 35 && status === "SAFE") return;
+
+    const targetContainer = document.querySelector('.a3s.aiL') || document.querySelector('.ii.gt');
+    if (!targetContainer) return;
+
+    const banner = document.createElement("div");
+    banner.id = "ss-gmail-banner";
+    const isCritical = status === "CRITICAL" || score >= 70;
+    const bgGradient = isCritical 
+        ? "linear-gradient(135deg, #450a0a 0%, #7f1d1d 100%)" 
+        : "linear-gradient(135deg, #451a03 0%, #78350f 100%)";
+    const borderColor = isCritical ? "#ef4444" : "#f59e0b";
+    const icon = isCritical ? "⚠️ CRITICAL THREAT WARNING" : "⚠ CAUTION SUSPICIOUS EMAIL";
+
+    const authInfo = fullResponse?.email_forensics || {};
+    const spf = authInfo.spf_status || "NONE";
+    const dkim = authInfo.dkim_status || "NONE";
+    const dmarc = authInfo.dmarc_status || "NONE";
+    
+    // Extract contextual explanation
+    const explanation = fullResponse?.explanation_summary || "Contextual threat detected.";
+
+    banner.style.cssText = `
+        margin: 12px 0 16px 0;
+        padding: 14px 18px;
+        background: ${bgGradient};
+        border-left: 5px solid ${borderColor};
+        border-radius: 8px;
+        color: #ffffff;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        z-index: 9999;
+    `;
+
+    banner.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <div style="font-weight: 800; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; color: ${borderColor}; display: flex; align-items: center; gap: 8px;">
+                ${icon} <span style="background: rgba(255,255,255,0.15); padding: 2px 8px; border-radius: 12px; font-size: 11px; color: white;">Risk Score: ${score}%</span>
+            </div>
+            <span style="font-size: 11px; color: #d4d4d8;">SecureSentinel Fusion Engine</span>
+        </div>
+        <div style="font-size: 13px; font-weight: 600; line-height: 1.5; color: #f4f4f5; margin-bottom: 6px;">
+            ${explanation}
+        </div>
+        <div style="font-size: 11px; color: #a1a1aa; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.1);">
+            Authentication check: <span style="color: ${spf.includes('PASS') ? '#34d399' : '#f87171'}">SPF: ${spf}</span> | 
+            <span style="color: ${dkim.includes('PASS') ? '#34d399' : '#f87171'}">DKIM: ${dkim}</span> | 
+            <span style="color: ${dmarc.includes('PASS') ? '#34d399' : '#f87171'}">DMARC: ${dmarc}</span>
+        </div>
+    `;
+
+    targetContainer.parentNode.insertBefore(banner, targetContainer);
+    console.log("✅ Injected In-Gmail Warning Banner above email body");
 }
 
 // ============================================
@@ -224,8 +344,14 @@ function scanContent(data) {
 // ============================================
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'GET_LAST_SCAN') {
-        console.log("[WebSentinel] Sending cached result to popup:", lastScanResult);
-        sendResponse(lastScanResult);
+        const activeContent = extractContent();
+        if (activeContent && activeContent.type === 'email') {
+            console.log("[WebSentinel] Sending active email scan to popup:", lastScanResult);
+            sendResponse(lastScanResult);
+        } else {
+            console.log("[WebSentinel] No active email open on current tab");
+            sendResponse(null);
+        }
     }
 });
 

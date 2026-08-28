@@ -277,6 +277,9 @@ class AnalysisContext(BaseModel):
     has_password_field: int = 0
     external_link_ratio: float = 0.0
     is_https: int = 1
+    raw_headers: str = ""
+    sender_domain: str = ""
+    subject: str = ""
 
 class DetectionRequest(BaseModel):
     text: str
@@ -463,7 +466,6 @@ async def detect_attack(request: DetectionRequest, db: Session = Depends(get_db)
                        db.commit()
                   except Exception: pass
 
-                  db.close()
                   db.close()
                   return {
                       "status": "SAFE",
@@ -1038,13 +1040,70 @@ async def detect_attack(request: DetectionRequest, db: Session = Depends(get_db)
         recent_scans.insert(0, scan_entry)
         if len(recent_scans) > 50: recent_scans.pop()
         
+        # --- EMAIL FORENSICS & AUTHENTICATION FUSION LAYER ---
+        email_auth_summary = {}
+        dns_summary = {}
+        fused_risk = {}
+        if request.source in ["universal_scanner", "gmail_realtime"] or (request.context and hasattr(request.context, 'raw_headers')):
+            try:
+                from app.services.email_forensics import parse_raw_email_headers
+                from app.services.dns_analysis import analyze_sender_domain_dns
+                from app.services.email_risk import fuse_email_risk_scores
+
+                raw_hdrs = getattr(request.context, 'raw_headers', '') if request.context else ''
+                email_auth_summary = parse_raw_email_headers(raw_hdrs)
+                
+                # Overwrite subject and sender_domain with parsed data if available
+                if email_auth_summary.get("subject") and email_auth_summary.get("subject") != "unknown":
+                    if request.context: request.context.subject = email_auth_summary.get("subject")
+                if email_auth_summary.get("from") and email_auth_summary.get("from") != "unknown":
+                    if request.context: request.context.sender_domain = email_auth_summary.get("from").split("@")[-1].strip(">").strip()
+
+                sender_domain = ""
+                if request.context and hasattr(request.context, 'sender_domain'):
+                    sender_domain = request.context.sender_domain
+                elif "@" in text:
+                    sender_domain = text.split("@")[-1].split("\n")[0].strip()
+
+                dns_summary = analyze_sender_domain_dns(sender_domain)
+                
+                ml_signals = {
+                    "urgency": probs[labels.index('urgency')],
+                    "fear": probs[labels.index('fear')],
+                    "authority": probs[labels.index('authority')]
+                }
+                email_ctx = {
+                    "subject": email_auth_summary.get("subject", ""),
+                    "text": text,
+                    "is_whitelisted": is_whitelisted,
+                    "sender_domain": sender_domain
+                }
+                
+                fused_risk = fuse_email_risk_scores(
+                    ml_content_score=max_prob,
+                    ml_signals=ml_signals,
+                    auth_summary=email_auth_summary,
+                    dns_summary=dns_summary,
+                    links_info=[],
+                    impersonation_score=probs[labels.index('impersonation')],
+                    email_context=email_ctx
+                )
+
+                max_prob = fused_risk["final_email_score"]
+                display_type = fused_risk["risk_level"]
+                print(f"📧 EMAIL FORENSIC FUSION: Score={max_prob} | Level={display_type} | Auth SPF={email_auth_summary.get('spf_status')} DKIM={email_auth_summary.get('dkim_status')} DMARC={email_auth_summary.get('dmarc_status')}")
+            except Exception as ef_err:
+                print(f"⚠️ Email Forensics Layer error: {ef_err}")
+
         # FINAL PRODUCTION SCHEMA
         return {
             "status": "CRITICAL" if max_prob >= 0.7 else ("SUSPICIOUS" if max_prob >= 0.4 else "SAFE"),
-            "neural_status": neural_status, # NEW FIELD
+            "neural_status": neural_status,
             "global_risk_score": float(max_prob),
             "signals": results_labels,
             "structural_flags": get_structural_audit(text, request.context),
+            "email_forensics": email_auth_summary,
+            "dns_summary": dns_summary,
             "explanation_summary": f"Target: {display_type} Analysis. Confidence: {max_prob*100:.1f}%"
         }
     except Exception as e:
@@ -1068,6 +1127,9 @@ async def detect_attack(request: DetectionRequest, db: Session = Depends(get_db)
              # Only persist if we have the necessary variables
              if 'max_prob' in locals() and 'hostname' in locals():
                  expl = f"Target: {display_type}" if 'display_type' in locals() else "Manual Scan"
+                 if 'fused_risk' in locals() and fused_risk.get("factors"):
+                     expl += " | Factors: " + ", ".join(fused_risk["factors"])
+                     
                  r_level = "SAFE"
                  if max_prob > 0.8: r_level = "HIGH_RISK"
                  elif max_prob > 0.5: r_level = "SUSPICIOUS"
@@ -1078,9 +1140,16 @@ async def detect_attack(request: DetectionRequest, db: Session = Depends(get_db)
                  # PRIVACY MODE: For Gmail real-time scans, only store metadata
                  if request.source == "gmail_realtime" or request.source == "universal_scanner":
                      print(f"🔒 PRIVACY MODE: Gmail real-time scan - storing metadata only")
-                     # Extract metadata from context
-                     subject = request.context.get('subject', 'Email Scan') if request.context else 'Email Scan'
-                     sender_domain = request.context.get('sender_domain', 'unknown') if request.context else 'unknown'
+                     # Extract metadata from context (supports Pydantic object & dict)
+                     if hasattr(request.context, 'subject'):
+                         subject = getattr(request.context, 'subject', 'Email Scan') or 'Email Scan'
+                         sender_domain = getattr(request.context, 'sender_domain', 'unknown') or 'unknown'
+                     elif isinstance(request.context, dict):
+                         subject = request.context.get('subject', 'Email Scan')
+                         sender_domain = request.context.get('sender_domain', 'unknown')
+                     else:
+                         subject = 'Email Scan'
+                         sender_domain = 'unknown'
                      # Store only metadata, not email content
                      final_url = f"[Gmail Scan] Subject: {subject} | From: {sender_domain}"
                      expl += " (Privacy Mode: Email content not stored)"
@@ -1109,17 +1178,29 @@ async def detect_attack(request: DetectionRequest, db: Session = Depends(get_db)
                              print(f"⏭️  PII Masking skipped (disabled or no settings)")
                      except Exception as pii_e:
                          print(f"❌ PII Mask error: {pii_e}")
-                         import traceback
-                         traceback.print_exc()
-                 # -------------------------
-
+                 
+                 import json
                  db_scan = models.ScanResult(
-                     url=final_url,
-                     domain=hostname,
-                     risk_score=max_prob,
-                     risk_level=r_level,
-                     explanation=expl,
-                     timestamp=datetime.now(IST)
+                    url=final_url,
+                    domain=hostname,
+                    risk_score=max_prob,
+                    risk_level=r_level,
+                    explanation=expl,
+                    timestamp=datetime.now(IST),
+                    # Forensic Fields
+                    sender=request.context.sender_domain if request.context and hasattr(request.context, 'sender_domain') else "unknown",
+                    subject=request.context.subject if request.context and hasattr(request.context, 'subject') else "unknown",
+                    spf_status=email_auth_summary.get("spf_status", "UNKNOWN") if 'email_auth_summary' in locals() else "UNKNOWN",
+                    dkim_status=email_auth_summary.get("dkim_status", "UNKNOWN") if 'email_auth_summary' in locals() else "UNKNOWN",
+                    dmarc_status=email_auth_summary.get("dmarc_status", "UNKNOWN") if 'email_auth_summary' in locals() else "UNKNOWN",
+                    origin_ip=email_auth_summary.get("origin_ip", "unknown") if 'email_auth_summary' in locals() else "unknown",
+                    received_chain=json.dumps(email_auth_summary.get("received_chain", [])) if 'email_auth_summary' in locals() else "[]",
+                    auth_results=email_auth_summary.get("auth_results", "UNKNOWN") if 'email_auth_summary' in locals() else "UNKNOWN",
+                    trust_score=fused_risk.get("trust_score", 0.0) if 'fused_risk' in locals() else 0.0,
+                    category=fused_risk.get("category", "UNKNOWN") if 'fused_risk' in locals() else "UNKNOWN",
+                    domain_age_days=dns_summary.get("domain_age_days", -1) if 'dns_summary' in locals() else -1,
+                    whois_registrar=dns_summary.get("whois_registrar", "UNKNOWN") if 'dns_summary' in locals() else "UNKNOWN"
+
                  )
                  db.add(db_scan)
                  db.commit()

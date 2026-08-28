@@ -21,20 +21,31 @@ document.addEventListener('DOMContentLoaded', async () => {
     checkCurrentTabRisk();
     initControls();
 
-    // FETCH LAST SCAN ON LOAD (Robust Logic)
-    chrome.storage.local.get(['latestScan'], (result) => {
-        if (result.latestScan) {
-            console.log("Got scan from STORAGE:", result.latestScan);
-            updateTemporalRiskDisplay(result.latestScan);
-        }
-    });
-
+    // FETCH SCAN FROM ACTIVE TAB FIRST (Prevents stale scan lingering across tabs)
     chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
         if (tabs[0] && tabs[0].id) {
             chrome.tabs.sendMessage(tabs[0].id, { type: "GET_LAST_SCAN" }, function (response) {
                 if (response) {
-                    console.log("Got cached scan from content script:", response);
+                    console.log("Got scan from active tab content script:", response);
                     updateTemporalRiskDisplay(response);
+                } else {
+                    // Active tab is not an email or has no scan - load latest from storage or reset to clean
+                    chrome.storage.local.get(['latestScan'], (result) => {
+                        if (result.latestScan) {
+                            console.log("Got fallback scan from STORAGE:", result.latestScan);
+                            updateTemporalRiskDisplay(result.latestScan);
+                        } else {
+                            updateTemporalRiskDisplay({ risk_score: 0, risk_level: "SAFE" });
+                        }
+                    });
+                }
+            });
+        } else {
+            chrome.storage.local.get(['latestScan'], (result) => {
+                if (result.latestScan) {
+                    updateTemporalRiskDisplay(result.latestScan);
+                } else {
+                    updateTemporalRiskDisplay({ risk_score: 0, risk_level: "SAFE" });
                 }
             });
         }

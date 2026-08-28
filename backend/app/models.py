@@ -11,6 +11,25 @@ class ScanResult(Base):
     risk_score = Column(Float)
     risk_level = Column(String)  # SAFE, SUSPICIOUS, HIGH_RISK
     explanation = Column(String)
+    
+    # Forensic Fields
+    sender = Column(String, default="unknown")
+    subject = Column(String, default="unknown")
+    spf_status = Column(String, default="UNKNOWN")
+    dkim_status = Column(String, default="UNKNOWN")
+    dmarc_status = Column(String, default="UNKNOWN")
+    origin_ip = Column(String, default="unknown")
+    received_chain = Column(String, default="[]") # JSON string
+    auth_results = Column(String, default="UNKNOWN")
+    
+    # New Context-Aware Fusion Fields
+    trust_score = Column(Float, default=0.0)
+    category = Column(String, default="UNKNOWN")
+    
+    # WHOIS Fields
+    domain_age_days = Column(Integer, default=-1)
+    whois_registrar = Column(String, default="UNKNOWN")
+    
     timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 class BlockedDomain(Base):

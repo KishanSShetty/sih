@@ -1,4 +1,4 @@
-import { Shield, LayoutDashboard, Activity, Settings, Lock } from 'lucide-react';
+import { Shield, LayoutDashboard, Activity, Settings, Lock, Mail } from 'lucide-react';
 import Link from 'next/link';
 
 export default function DashboardLayout({
@@ -19,6 +19,7 @@ export default function DashboardLayout({
 
         <nav className="flex-1 p-4 space-y-1">
           <NavLink href="/" icon={<LayoutDashboard size={18} />}>Overview</NavLink>
+          <NavLink href="/gmail" icon={<Mail size={18} />}>Gmail Verification</NavLink>
           <NavLink href="/activity" icon={<Activity size={18} />}>Activity Insights</NavLink>
           <NavLink href="/privacy" icon={<Lock size={18} />}>Privacy Center</NavLink>
           <NavLink href="/settings" icon={<Settings size={18} />}>Controls</NavLink>

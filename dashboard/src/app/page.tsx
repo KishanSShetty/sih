@@ -2,9 +2,10 @@
 
 import { RiskScoreCard } from "@/components/overview/RiskScoreCard";
 import { TrendChart } from "@/components/overview/TrendChart";
-import { AlertTriangle, Activity, Loader2, Clock, CheckCircle2, Shield } from "lucide-react";
+import { AlertTriangle, Activity, Loader2, Clock, CheckCircle2, Shield, Mail, ArrowRight } from "lucide-react";
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
+import Link from "next/link";
 
 interface DashboardData {
     kpi: {
@@ -106,15 +107,27 @@ export default function Home() {
       className="space-y-8 pb-10"
     >
       {/* Welcome Section */}
-      <motion.div variants={item}>
-        <h1 className="text-3xl font-bold tracking-tight text-slate-900">Security Overview</h1>
-        <p className="text-slate-500 mt-2 flex items-center gap-2">
-          System Status: 
-          <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium ${kpi.safety_score > 70 ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
-             {kpi.safety_score > 70 ? <CheckCircle2 size={12}/> : <AlertTriangle size={12}/>}
-             {kpi.safety_score > 70 ? "Stable & Protected" : "Attention Needed"}
-          </span>
-        </p>
+      <motion.div variants={item} className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+            <h1 className="text-3xl font-bold tracking-tight text-slate-900">Security Overview</h1>
+            <p className="text-slate-500 mt-2 flex items-center gap-2">
+              System Status: 
+              <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium ${kpi.safety_score > 70 ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                 {kpi.safety_score > 70 ? <CheckCircle2 size={12}/> : <AlertTriangle size={12}/>}
+                 {kpi.safety_score > 70 ? "Stable & Protected" : "Attention Needed"}
+              </span>
+            </p>
+        </div>
+        <Link href="/gmail">
+            <div className="group flex items-center gap-3 bg-blue-600 hover:bg-blue-700 text-white px-5 py-3 rounded-xl shadow-sm transition-all hover:shadow-md cursor-pointer">
+                <Mail size={20} className="opacity-80" />
+                <div className="flex flex-col text-left">
+                    <span className="text-sm font-semibold tracking-wide">Gmail Verification Dashboard</span>
+                    <span className="text-[10px] text-blue-200 uppercase tracking-widest font-bold">New Security Feature</span>
+                </div>
+                <ArrowRight size={18} className="ml-2 group-hover:translate-x-1 transition-transform opacity-70" />
+            </div>
+        </Link>
       </motion.div>
 
       {/* KPI Grid */}

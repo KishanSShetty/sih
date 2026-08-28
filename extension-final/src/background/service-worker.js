@@ -446,7 +446,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     subject: message.data.subject,
                     sender_domain: message.data.senderDomain,
                     timestamp: message.data.timestamp,
-                    privacy_mode: true
+                    privacy_mode: true,
+                    raw_headers: message.data.rawHeaders || ""
                 }
             })
         })
@@ -457,6 +458,63 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             .then(data => sendResponse({ success: true, data }))
             .catch(err => sendResponse({ success: false, error: err.message }));
 
+        return true; // Keep channel open for async response
+    }
+
+    if (message.type === "GET_RAW_EMAIL_API") {
+        console.log(`[SecureSentinel] Gmail API authentication requested for message ID: ${message.messageId}`);
+        
+        chrome.identity.getAuthToken({ interactive: true }, function(token) {
+            if (chrome.runtime.lastError || !token) {
+                console.warn("[SecureSentinel] Gmail API authentication failed or user denied access.", chrome.runtime.lastError);
+                sendResponse({ success: false, reason: "AUTH_FAILED" });
+                return;
+            }
+            
+            console.log(`[SecureSentinel] Gmail API authentication successful. Requesting raw message: ${message.messageId}`);
+            
+            fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${message.messageId}?format=raw`, {
+                method: "GET",
+                headers: {
+                    "Authorization": `Bearer ${token}`
+                }
+            })
+            .then(res => {
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                return res.json();
+            })
+            .then(data => {
+                if (!data || !data.raw) {
+                    throw new Error("No raw field in Gmail API response");
+                }
+                console.log("[SecureSentinel] Gmail API response received");
+                
+                // Base64URL decode
+                let base64 = data.raw.replace(/-/g, '+').replace(/_/g, '/');
+                // Pad with = to make it a multiple of 4
+                while (base64.length % 4 !== 0) {
+                    base64 += '=';
+                }
+                
+                const rawMime = atob(base64);
+                
+                console.log("[SecureSentinel] Raw MIME acquired: YES");
+                console.log(`[SecureSentinel] Decoded bytes: ${rawMime.length}`);
+                console.log(`[SecureSentinel] From header present: ${/^From:/im.test(rawMime) ? 'YES' : 'NO'}`);
+                console.log(`[SecureSentinel] Date header present: ${/^Date:/im.test(rawMime) ? 'YES' : 'NO'}`);
+                console.log(`[SecureSentinel] Subject header present: ${/^Subject:/im.test(rawMime) ? 'YES' : 'NO'}`);
+                console.log(`[SecureSentinel] Received header present: ${/^Received:/im.test(rawMime) ? 'YES' : 'NO'}`);
+                console.log(`[SecureSentinel] Authentication-Results present: ${/^Authentication-Results:/im.test(rawMime) ? 'YES' : 'NO'}`);
+                console.log(`[SecureSentinel] Return-Path present: ${/^Return-Path:/im.test(rawMime) ? 'YES' : 'NO'}`);
+                
+                sendResponse({ success: true, messageId: message.messageId, raw: rawMime });
+            })
+            .catch(err => {
+                console.error("[SecureSentinel] Failed to fetch raw message via API:", err);
+                sendResponse({ success: false, reason: "API_FETCH_FAILED" });
+            });
+        });
+        
         return true; // Keep channel open for async response
     }
 });
