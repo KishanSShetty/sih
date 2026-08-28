@@ -47,7 +47,7 @@ export default function Home() {
   useEffect(() => {
     const fetchData = async () => {
         try {
-            const res = await fetch("http://localhost:8000/api/v1/dashboard");
+            const res = await fetch("http://localhost:8002/api/v1/dashboard");
             const json = await res.json();
             setData(json);
         } catch (error) {

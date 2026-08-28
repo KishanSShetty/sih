@@ -2,7 +2,7 @@ import requests
 import json
 
 # Test the backend API directly
-url = "http://localhost:8000/api/v1/detect"
+url = "http://localhost:8002/api/v1/detect"
 
 test_urls = [
     "rvce.edu.in",

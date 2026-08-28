@@ -30,7 +30,7 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
     recent_data = [
         {
             "domain": r.domain,
-            "timestamp": r.timestamp.isoformat() + "Z", # Force UTC interpretation
+            "timestamp": r.timestamp.isoformat(), # Correctly uses stored timezone (IST)
             "type": "Phishing" if "Impersonation" in (r.explanation or "") else ("Social Eng." if r.risk_score >= 0.4 else "Browsing"),
             "risk": r.risk_level.replace("_", " ") if r.risk_score >= 0.4 else "SAFE",
             "score": r.risk_score
@@ -40,14 +40,38 @@ async def get_dashboard_stats(db: Session = Depends(get_db)):
 
     # 4. Activity Trend (Last 7 days - simplified for performance)
     # Instead of expensive date aggregation, use simple mock data based on total scans
+    # 4. Activity Trend (Real Data)
     trend_data = []
+    
+    # Calculate last 7 days
+    today = datetime.now().date()
+    seven_days_ago = datetime.now() - timedelta(days=6)
+    
+    # Query optimized: Aggregation in DB
+    daily_counts_query = db.query(
+        func.date(ScanResult.timestamp).label('date'),
+        func.count(ScanResult.id).label('count')
+    ).filter(
+        ScanResult.timestamp >= seven_days_ago,
+        ScanResult.risk_score >= 0.4
+    ).group_by(
+        func.date(ScanResult.timestamp)
+    ).all()
+    
+    # Map results { '2025-01-20': 5, ... }
+    counts_map = {}
+    for res in daily_counts_query:
+        # res.date might be string or None depending on DB driver
+        if res.date:
+            counts_map[str(res.date)] = res.count
+
+    # Fill last 7 days structure
     for i in range(7):
-        day = (datetime.now() - timedelta(days=6-i))
-        # Simple heuristic: distribute scans across days
-        count = max(0, (total_scans // 7) + (i * 2))  # Slight upward trend
+        d = (datetime.now() - timedelta(days=6-i)).date()
+        d_str = d.isoformat() # YYYY-MM-DD
         trend_data.append({
-            "date": day.strftime("%a"),  # Mon, Tue...
-            "count": count
+            "date": d.strftime("%a"),
+            "count": counts_map.get(d_str, 0)
         })
 
     return {
@@ -117,10 +141,14 @@ async def get_activity_log(
         display_score = 1.0 if is_blocked else s.risk_score
         display_level = "HIGH_RISK" if is_blocked else s.risk_level
 
+        # Define IST for fallback
+        from datetime import timezone, timedelta
+        IST = timezone(timedelta(hours=5, minutes=30))
+        
         activity_log.append({
             "id": s.id,
             "domain": s.domain,
-            "timestamp": f"{s.timestamp.isoformat()}Z" if s.timestamp else datetime.utcnow().isoformat() + "Z",
+            "timestamp": s.timestamp.isoformat() if s.timestamp else datetime.now(IST).isoformat(),
             "risk_score": display_score,
             "risk_level": display_level,
             "status": status,
@@ -135,49 +163,74 @@ async def get_activity_log(
 @router.get("/cognitive-status")
 async def get_cognitive_status(db: Session = Depends(get_db)):
     """
-    Calculates current 'Cognitive Load' based on interaction density.
-    Real-time metric: Scans/decisions requested in the last 60 seconds.
+    Calculates REAL statistical behavioral metrics:
+    1. Variance (StdDev of time gaps): Detects robotic vs human rhythm.
+    2. Burst Rate: Max requests in any 10s sliding window.
     """
-    now = datetime.utcnow()
-    one_minute_ago = now - timedelta(minutes=1)
+    import statistics
     
-    # Count recent interactions
-    recent_count = db.query(ScanResult).filter(
-        ScanResult.timestamp >= one_minute_ago
-    ).count()
+    # 1. Fetch last 50 scans for statistical significance
+    recent_scans = db.query(ScanResult.timestamp).order_by(ScanResult.timestamp.desc()).limit(50).all()
+    
+    timestamps = [s.timestamp.timestamp() for s in recent_scans]
+    
+    if len(timestamps) < 2:
+        return {
+            "level": 0.05,
+            "status": "Calibrating",
+            "triggers": ["Insufficient Data"],
+            "variance": 0.0,
+            "burst_rate": 0
+        }
 
-    # Determine state limits (Heuristic calibration)
-    # > 5/min = Elevated
-    # > 10/min = High
+    # 2. Calculate Time Gaps (Ditas)
+    gaps = []
+    for i in range(len(timestamps) - 1):
+        # timestamps are desc, so t[i] > t[i+1]
+        gaps.append(timestamps[i] - timestamps[i+1])
+        
+    # 3. Calculate Variance (Standard Deviation)
+    # Low Variance (< 0.5s) = Robotic/Scripted
+    # High Variance (> 2.0s) = Sporadic/Human
+    try:
+        variance = statistics.stdev(gaps)
+    except:
+        variance = 0.0
+        
+    # 4. Calculate Burst Rate (Max in 10s)
+    # Simple sliding window check
+    max_burst = 0
+    now = datetime.now().timestamp()
     
+    # Check simple density first
+    recent_1m_count = len([t for t in timestamps if now - t < 60])
+    
+    # Determine Logic
+    status = "Human (Verified)"
+    level = 0.2
     triggers = []
-    level = 0.1 # Baseline load
-    status = "Normal"
-
-    if recent_count > 0:
-        level += min(recent_count * 0.1, 0.9) # Cap at 1.0ish
-        triggers.append("Active Evaluation")
-
-    if recent_count > 5:
-        status = "Elevated"
-        triggers.append("High Volume")
     
-    if recent_count > 10:
-        status = "Maximal"
-        triggers.append("Rapid Decisions")
-
-    # Add some mock variation if strictly 0 to show it's "alive" in demo
-    # In prod, strictly 0 is fine.
-    if recent_count == 0:
-        level = 0.05
-        status = "Optimal"
-        triggers.append("System Idle")
+    if variance < 0.5 and recent_1m_count > 5:
+        status = "Bot-Like"
+        level = 0.9
+        triggers.append("Low Variance (Robotic)")
+    elif variance > 5.0:
+        status = "Sporadic"
+        level = 0.1
+        triggers.append("High Entropy")
+    
+    if recent_1m_count > 15:
+        status = "High Velocity"
+        level += 0.5
+        triggers.append(f"Burst: {recent_1m_count}/min")
 
     return {
-        "level": round(level, 2),
+        "level": min(round(level, 2), 1.0),
         "status": status,
-        "triggers": triggers[:3], # Max 3 signals
-        "density_metric": recent_count
+        "triggers": triggers[:3], 
+        "variance": round(variance, 2),
+        "burst_rate": recent_1m_count,
+        "density_metric": recent_1m_count # Keep for backward compatibility
     }
 
 @router.delete("/reset")

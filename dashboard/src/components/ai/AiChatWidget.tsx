@@ -50,7 +50,7 @@ export function AiChatWidget() {
     try {
         const pageContext = document.body.innerText.substring(0, 3000);
 
-        const res = await fetch("http://localhost:8000/api/v1/chat", {
+        const res = await fetch("http://localhost:8002/api/v1/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({

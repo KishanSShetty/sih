@@ -20,7 +20,7 @@ export default function ActivityPage() {
   useEffect(() => {
     const fetchActivity = async () => {
         try {
-            const res = await fetch("http://localhost:8000/api/v1/activity");
+            const res = await fetch("http://localhost:8002/api/v1/activity");
             const data = await res.json();
             setActivity(data);
         } catch (error) {

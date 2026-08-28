@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
-from app.services.llm import get_llm_service, LlmService
+from app.services.multi_agent import get_orchestrator, MultiAgentOrchestrator
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 
@@ -12,14 +12,18 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     suggestions: List[str]
+    agent: Optional[str] = "Sentinel AI"
+    badge: Optional[str] = "🤖 Sentinel AI"
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(
     request: ChatRequest,
-    service: LlmService = Depends(get_llm_service)
+    orchestrator: MultiAgentOrchestrator = Depends(get_orchestrator)
 ):
-    result = await service.chat_with_context(request.message, request.context)
+    result = await orchestrator.route_and_execute(request.message, request.context)
     return ChatResponse(
         response=result["response"],
-        suggestions=result["suggestions"]
+        suggestions=result["suggestions"],
+        agent=result.get("agent", "Sentinel AI"),
+        badge=result.get("badge", "🤖 Sentinel AI")
     )
